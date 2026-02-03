@@ -1,0 +1,320 @@
+# Buildly
+建物管理OS
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BIM Viewer</title>
+    <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; overflow: hidden; }
+        
+        .app-container {
+            display: flex;
+            height: 100vh;
+            gap: 20px;
+            padding: 20px;
+            background: #f6f8fa;
+        }
+        
+        .sidebar {
+            width: 280px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .viewer-area {
+            flex-grow: 1;
+            position: relative;
+            background: #000;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+        
+        #aps-viewer { width: 100%; height: 100%; }
+        
+        .ui-block {
+            background: #fff;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e1e4e8;
+        }
+        
+        .ui-block h4 {
+            margin: 0 0 10px 0;
+            font-size: 13px;
+            color: #586069;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+        
+        .btn {
+            width: 100%;
+            height: 44px;
+            padding: 0 15px;
+            margin-bottom: 8px;
+            border-radius: 6px;
+            border: 1px solid #d1d5da;
+            background: #fff;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: 0.2s;
+        }
+        
+        .btn:hover { background: #f6f8fa; border-color: #0366d6; }
+        .btn.active { background: #d93025; color: #fff; border-color: #d93025; }
+        
+        select {
+            width: 100%;
+            height: 40px;
+            padding: 0 10px;
+            border-radius: 6px;
+            border: 1px solid #d1d5da;
+            background: #fff;
+            font-size: 14px;
+        }
+        
+        #action-menu {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            z-index: 9999;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            width: 280px;
+            text-align: center;
+        }
+        
+        #toast {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #333;
+            color: #fff;
+            padding: 10px 20px;
+            border-radius: 30px;
+            font-size: 13px;
+            z-index: 10000;
+            display: none;
+        }
+        
+        @media (max-width: 768px) {
+            .app-container { flex-direction: column; padding: 10px; }
+            .sidebar { width: 100%; }
+            .viewer-area { height: 400px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <div class="sidebar">
+            <div class="ui-block">
+                <h4>📷 View Control</h4>
+                <button class="btn" onclick="saveCurrentView()">💾 ビューを保存</button>
+                <button id="pin-mode-btn" class="btn" onclick="togglePinMode()">📍 ピン配置: OFF</button>
+            </div>
+            <div class="ui-block">
+                <h4>🔍 Area Jump</h4>
+                <select id="jump-select" onchange="jumpToSelectedView()">
+                    <option value="">読込中...</option>
+                </select>
+            </div>
+        </div>
+        
+        <div class="viewer-area">
+            <div id="aps-viewer"></div>
+            <div id="action-menu">
+                <h3 id="selected-obj-name" style="font-size:15px; margin-bottom:15px; font-weight:bold;">部材名</h3>
+                <button class="btn" style="background:#e3f2fd; color:#0d47a1; border:none;" onclick="triggerAction('update')">🛠 BIM更新依頼</button>
+                <button class="btn" onclick="closeMenu(true)" style="border:none; color:#666; font-size:12px;">キャンセル</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="toast"></div>
+    
+    <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js"></script>
+    <script>
+        const MODEL_URN = 'dXJuOmFkc2sud2lwcHJvZDpmcy5maWxlOnZmLjFJVWFxZll4VE5hZ3hiN2FfVmR2U2c_dmVyc2lvbj0zNg';
+        const TOKEN_URL = 'https://hook.us2.make.com/7inww4v9598mm8r5j1d8uuy7bdehj2a8';
+        const SHARED_WEBHOOK_URL = 'https://hook.us2.make.com/m81nv1b2m54qodi9gbv3eiljj6s4u6tv';
+        const FORM_URLS = { update: 'https://forms.fillout.com/t/rrPbDRMCaNus' };
+
+        let viewer, viewData = [], isPinMode = false, ghostPinGroup = null, fixedPinGroup = null, currentParams = "";
+
+        function showToast(msg) {
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 3000);
+        }
+
+        function initViewer() {
+            const options = {
+                env: 'AutodeskProduction2',
+                api: 'streamingV2',
+                getAccessToken: async (cb) => {
+                    const res = await fetch(TOKEN_URL);
+                    const data = await res.json();
+                    cb(data.access_token, 3600);
+                }
+            };
+            
+            Autodesk.Viewing.Initializer(options, () => {
+                viewer = new Autodesk.Viewing.GuiViewer3D(document.getElementById('aps-viewer'));
+                viewer.start();
+                Autodesk.Viewing.Document.load('urn:' + MODEL_URN, (doc) => {
+                    viewer.loadDocumentNode(doc, doc.getRoot().getDefaultGeometry()).then(() => {
+                        fetchViewData();
+                        setupInteraction();
+                    });
+                });
+            });
+        }
+
+        async function fetchViewData() {
+            try {
+                const res = await fetch(`${SHARED_WEBHOOK_URL}?t=${Date.now()}`);
+                const text = await res.text();
+                const start = text.search(/[\[\{]/);
+                if (start === -1) return;
+                const data = JSON.parse(text.substring(start));
+                viewData = Array.isArray(data) ? data : [data];
+                const select = document.getElementById('jump-select');
+                select.innerHTML = '<option value="">-- エリア選択 --</option>';
+                viewData.forEach((v, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = i;
+                    opt.textContent = v.name;
+                    select.appendChild(opt);
+                });
+            } catch (e) {}
+        }
+
+        function createPin(isGhost = false) {
+            const group = new THREE.Group();
+            const head = new THREE.Mesh(
+                new THREE.SphereGeometry(0.15, 16, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: isGhost ? 0.5 : 1, depthTest: false })
+            );
+            head.position.y = 0.5;
+            const tip = new THREE.Mesh(
+                new THREE.ConeGeometry(0.03, 0.5, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: isGhost ? 0.5 : 1, depthTest: false })
+            );
+            tip.rotation.x = Math.PI;
+            tip.position.y = 0.25;
+            group.add(head);
+            group.add(tip);
+            return group;
+        }
+
+        function setupInteraction() {
+            const container = document.getElementById('aps-viewer');
+            container.addEventListener('mousemove', (e) => {
+                if (!isPinMode || !viewer) return;
+                const rect = container.getBoundingClientRect();
+                const hit = viewer.impl.hitTest(e.clientX - rect.left, e.clientY - rect.top, true);
+                if (hit) {
+                    if (!ghostPinGroup) {
+                        ghostPinGroup = createPin(true);
+                        if (!viewer.overlays.hasScene('ghost')) viewer.overlays.addScene('ghost');
+                        viewer.overlays.addMesh(ghostPinGroup, 'ghost');
+                    }
+                    ghostPinGroup.position.set(hit.point.x, hit.point.y, hit.point.z);
+                    viewer.impl.invalidate(true);
+                }
+            });
+            
+            container.addEventListener('click', (e) => {
+                if (!isPinMode || !viewer) return;
+                const rect = container.getBoundingClientRect();
+                const hit = viewer.impl.hitTest(e.clientX - rect.left, e.clientY - rect.top, true);
+                if (hit) {
+                    if (fixedPinGroup) viewer.overlays.removeMesh(fixedPinGroup, 'fixed');
+                    fixedPinGroup = createPin(false);
+                    fixedPinGroup.position.set(hit.point.x, hit.point.y, hit.point.z);
+                    if (!viewer.overlays.hasScene('fixed')) viewer.overlays.addScene('fixed');
+                    viewer.overlays.addMesh(fixedPinGroup, 'fixed');
+                    
+                    viewer.getProperties(hit.dbId, (p) => {
+                        let f = p.name;
+                        p.properties.forEach(pr => {
+                            if (pr.displayName.includes("Family")) f = pr.displayValue;
+                        });
+                        currentParams = new URLSearchParams({
+                            guid: p.externalId,
+                            name: p.name,
+                            x: hit.point.x.toFixed(2),
+                            y: hit.point.y.toFixed(2),
+                            z: hit.point.z.toFixed(2)
+                        }).toString();
+                        document.getElementById('selected-obj-name').textContent = f;
+                        document.getElementById('action-menu').style.display = 'block';
+                    });
+                }
+            });
+        }
+
+        function togglePinMode() {
+            isPinMode = !isPinMode;
+            const btn = document.getElementById('pin-mode-btn');
+            btn.innerHTML = isPinMode ? "📍 ピン配置: ON" : "📍 ピン配置: OFF";
+            btn.classList.toggle('active', isPinMode);
+            if (!isPinMode && ghostPinGroup) {
+                viewer.overlays.removeMesh(ghostPinGroup, 'ghost');
+                ghostPinGroup = null;
+            }
+        }
+
+        async function saveCurrentView() {
+            const name = prompt("保存するビュー名:");
+            if (!name) return;
+            const payload = { name: name, camera: JSON.stringify(viewer.getState({viewport: true})) };
+            try {
+                await fetch(SHARED_WEBHOOK_URL, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                showToast("✅ 保存しました");
+                fetchViewData();
+            } catch (e) {
+                showToast("❌ 保存エラー");
+            }
+        }
+
+        function jumpToSelectedView() {
+            const v = viewData[document.getElementById('jump-select').value];
+            if (v) viewer.restoreState(JSON.parse(v.camera));
+        }
+
+        function triggerAction(type) {
+            window.open(`${FORM_URLS[type]}?${currentParams}`, '_blank');
+            closeMenu(false);
+            togglePinMode();
+        }
+
+        function closeMenu(clear) {
+            document.getElementById('action-menu').style.display = 'none';
+            if (clear && fixedPinGroup) viewer.overlays.removeMesh(fixedPinGroup, 'fixed');
+        }
+
+        initViewer();
+    </script>
+</body>
+</html>
